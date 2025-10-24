@@ -231,8 +231,16 @@ class GUI:
         style = ttk.Style(self.root)                                    
         style.configure(".", font=self.ui_font)                        
         style.configure("TCombobox", font=self.ui_font)        
-        style.theme_use("vista")    # utilize a built-in theme for UI experience        
-        self.root.option_add("*TCombobox*Listbox*Font", self.ui_font)          
+        try:
+            style.theme_use("vista")
+        except tk.TclError:
+            for candidate in ("clam", "alt", "default", "classic", "aqua"): # fallback themes known to exist cross-platform
+                try:
+                    style.theme_use(candidate)
+                    break
+                except tk.TclError:
+                    pass        
+        self.root.option_add("*TCombobox*Listbox*Font", self.ui_font)       
         
         self.build_layout() # build all frames and widgets
         self.keybind()  # hook hotkeys
