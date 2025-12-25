@@ -1,19 +1,13 @@
-# Student Name: Casey Dane  
-# Titan Email: crdane@csu.fullerton.edu
-# Project: CPSC 335 – Interactive Campus Navigation System
-# Date: 10/24/2025
-
-
 import tkinter as tk
 from tkinter import ttk, messagebox
 from tkinter import font as tkfont
 import os
 import random
+import heapq
 import math
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional, FrozenSet, Dict, Tuple, List, Set
-
 
 DEFAULT_MAP_PATH = os.path.join(os.path.dirname(__file__), "csuf_map.png")
 
@@ -102,6 +96,7 @@ class Graph:
         out.sort(key=lambda t: t[0])    # stable traversal order so demo is repeatable
         return out
     
+    
     def bfs(self, start, goal, accessible_only):
         if start not in self.nodes or goal not in self.nodes:
             raise ValueError("Start and goal must be valid nodes")
@@ -133,6 +128,7 @@ class Graph:
             cur = parent[cur]
         path.reverse()
         return path, order, discover
+ 
  
     def dfs(self, start, goal, accessible_only):
         if start not in self.nodes or goal not in self.nodes:
@@ -204,6 +200,117 @@ class Graph:
         del self.nodes[name]
 
         return removed_edges
+    
+
+    def heuristic(self, u, v, weight_type): # toggle heuristic for simple swap from dijkstra => A*
+        x1, y1, _, _ = self.nodes[u]
+        x2, y2, _, _ = self.nodes[v]
+        return math.hypot(x2 - x1, y2 - y1) if weight_type == "distance" else 0
+
+
+    def dijkstra(self, start, goal, weight_type, accessible_only):
+        return self._weighted_search(start, goal, weight_type, accessible_only, use_heuristic=False)
+
+
+    def astar(self, start, goal, weight_type, accessible_only):
+        return self._weighted_search(start, goal, weight_type, accessible_only, use_heuristic=True)
+
+
+    def _weighted_search(self, start, goal, weight_type, accessible_only, use_heuristic):
+        if start not in self.nodes or goal not in self.nodes:
+            raise ValueError("Start and goal must be valid nodes")
+
+        pq = [(0, start)]        
+        costs = {start: 0}
+        parent = {start: None}        
+        visited_order = []      
+        discover_order = []     
+
+        while pq:
+            cur_priority, u = heapq.heappop(pq)
+            if cur_priority > costs.get(u, float('inf')) + (self.heuristic(u, goal, weight_type) if use_heuristic else 0):
+                continue
+            visited_order.append(u)
+            if u == goal:
+                break
+
+            for v, edge in self.neighbors(u, accessible_only):
+                weight = edge.distance if weight_type == "distance" else edge.time
+                new_cost = costs[u] + weight
+
+                if new_cost < costs.get(v, float('inf')):   # relaxation step
+                    costs[v] = new_cost
+                    parent[v] = u
+                    priority = new_cost # Dijkstra: priority = new_cost; A*: priority = new_cost + heuristic(v, goal)
+
+                    if use_heuristic:
+                        priority += self.heuristic(v, goal, weight_type)                    
+                    heapq.heappush(pq, (priority, v))
+                    discover_order.append(v)
+
+        if goal not in parent:
+            return [], visited_order, discover_order
+        
+        path = []
+        curr = goal
+        while curr is not None:
+            path.append(curr)
+            curr = parent[curr]
+        path.reverse()
+              
+        return path, visited_order, discover_order
+
+
+    def kruskal(self, weight_type, accessible_only):
+        valid_edges = []
+        for e in self.edges.values():
+            if e.closed: continue
+            if accessible_only and not e.accessible: continue
+            weight = e.distance if weight_type == "distance" else e.time
+            valid_edges.append((weight, e))
+            
+        valid_edges.sort(key=lambda x: x[0])
+        dsu = DisjointSet(self.nodes.keys())
+        mst_edges = []
+        total_cost = 0
+        
+        for weight, e in valid_edges:
+            if dsu.union(e.u, e.v):
+                mst_edges.append(e)
+                total_cost += weight
+                
+        return mst_edges, total_cost
+
+    def prim(self, start_node, weight_type, accessible_only):
+        if start_node not in self.nodes:
+            raise ValueError("Start node required for Prim's")
+            
+        mst_edges = []
+        visited = {start_node}
+        total_cost = 0
+        
+        pq = []
+        for nbr, e in self.neighbors(start_node, accessible_only):
+            w = e.distance if weight_type == "distance" else e.time
+            heapq.heappush(pq, (w, nbr, e))
+            
+        while pq:
+            weight, u, edge = heapq.heappop(pq)
+            
+            if u in visited:
+                continue
+                
+            visited.add(u)
+            mst_edges.append(edge)
+            total_cost += weight
+            
+            for nbr, e in self.neighbors(u, accessible_only):
+                if nbr not in visited:
+                    w = e.distance if weight_type == "distance" else e.time
+                    heapq.heappush(pq, (w, nbr, e))
+                    
+        return mst_edges, total_cost
+
                 
     
 class GUI:
@@ -212,6 +319,7 @@ class GUI:
     ANIM_EDGE_MS = 400          # interval between edges turning green 
     ANIM_PING_FLASH_MS = 600    # duration node stays yellow
     ANIM_NODE_MS = 400          # interval between nodes turning green 
+    
     
     def __init__(self, root: tk.Tk):
         self.root = root 
@@ -223,23 +331,25 @@ class GUI:
         self.map_item: Optional[int] = None              # canvas item id for the map image (to hide/show)
         self.overlay_var = tk.BooleanVar(value = False)   
         
-        self.ui_font = tkfont.Font(family="Arial", size=12, weight="normal")            
+        self.ui_font = tkfont.Font(family="Arial", size=13, weight="normal")            
         self.ui_font_bold = tkfont.Font(family="Arial", size=15, weight="bold")  
         self.root.option_add("*Font", self.ui_font)                     
         self.root.option_add("*Text*Font", self.ui_font)
                         
-        style = ttk.Style(self.root)                                    
-        style.configure(".", font=self.ui_font)                        
-        style.configure("TCombobox", font=self.ui_font)        
-        try:
-            style.theme_use("vista")
-        except tk.TclError:
-            for candidate in ("clam", "alt", "default", "classic", "aqua"): # fallback themes known to exist cross-platform
-                try:
+        style = ttk.Style(self.root)  
+        available_themes = style.theme_names()   
+                                   
+        if "aqua" in available_themes:
+            style.theme_use("aqua")  # mac
+        elif "vista" in available_themes:
+            style.theme_use("vista") # windows 
+        else:
+            for candidate in ("clam", "alt", "default", "classic"): 
+                if candidate in available_themes:
                     style.theme_use(candidate)
                     break
-                except tk.TclError:
-                    pass        
+                
+        style.configure(".", font=self.ui_font)          
         self.root.option_add("*TCombobox*Listbox*Font", self.ui_font)       
         
         self.build_layout() # build all frames and widgets
@@ -247,16 +357,25 @@ class GUI:
         
         self.animating = False
         self.current_animation_tokens: list[int] = []        
-        
+        self.current_popup: Optional[tk.Toplevel] = None
     
     def build_layout(self):
-        self.root.geometry("1200x1030")   
+        self.root.geometry("1200x950")   
+        try:
+            self.root.state('zoomed')   # windows zoom
+        except:
+            try:
+                # Linux 'Zoomed'
+                self.root.attributes('-zoomed', True) # linux zoom
+            except:
+                w = self.root.winfo_screenwidth() # Mac (No 'zoomed' state) => manually set geometry to screen dimensions
+                h = self.root.winfo_screenheight()
+                self.root.geometry(f"{w}x{h}+0+0")
 
-        # grid config so left side expands with window resize           
         self.root.grid_rowconfigure(0, weight=1)
-        self.root.grid_columnconfigure(0, weight=1)
-        self.root.grid_columnconfigure(1, weight=0, minsize=240)
-        
+        self.root.grid_columnconfigure(0, weight=1) 
+        self.root.grid_columnconfigure(1, weight=0)
+                
         # LEFT SIDE: canvas frame
         self.left = ttk.Frame(self.root)
         self.left.grid(row=0, column=0, sticky="nsew")  
@@ -264,24 +383,27 @@ class GUI:
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
         # RIGHT SIDE: sidebar
-        self.right = ttk.Frame(self.root, width=410)
-        self.right.grid(row=0, column=1, sticky="nsw")
-        self.right.pack_propagate(False)    # keep fixed width instead of shrinking to children
+        self.right = ttk.Frame(self.root) 
+        self.right.grid(row=0, column=1, sticky="nsew")
 
         box = tk.Frame(self.right, padx=8, pady=8)
         box.pack(fill=tk.Y)
         
         ttk.Label(box, text = "CSUF Default Map Overlay:", font=self.ui_font_bold).pack(anchor="w", pady=(0,4))  # HEADING          
         ttk.Checkbutton(box, text = "Show Map", variable=self.overlay_var, command = self.toggle_map).pack(anchor = "w")   
-        
-        ttk.Label(box, text = "Add Building:", font=self.ui_font_bold).pack(anchor="w", pady=(29,4))      # HEADING: node controls
+       
+       
+        ttk.Separator(box, orient='horizontal').pack(fill='x', pady=10)        
+        ttk.Label(box, text = "Add Building:", font=self.ui_font_bold).pack(anchor="w", pady=2)      # HEADING: node controls
         row = ttk.Frame(box)
         row.pack(fill = tk.X)
         self.node_name_var = tk.StringVar()
         ttk.Entry(row, textvariable = self.node_name_var).pack(side = tk.LEFT, fill = tk.X, expand = True)
         ttk.Button(row, text = "Place", command = self.start_node).pack(side = tk.LEFT, padx = (8,0))      
     
-        ttk.Label(box, text = "Connect Buildings:", font=self.ui_font_bold).pack(anchor="w", pady=(30, 0))    # HEADING: edge controls
+    
+        ttk.Separator(box, orient='horizontal').pack(fill='x', pady=10)        
+        ttk.Label(box, text = "Connect Buildings:", font=self.ui_font_bold).pack(anchor="w", pady=2)    # HEADING: edge controls
         
         self.selected_label = ttk.Label(box, text = "Currently Selected: ")
         self.selected_label.pack(anchor = "w", pady = (4, 4))
@@ -305,9 +427,10 @@ class GUI:
         ttk.Button(box, text = "Toggle Closure", command = self.toggle_close).pack(fill = tk.X, pady = (3,3))
         ttk.Button(box, text="Toggle Accessibility", command=self.toggle_accessible).pack(fill=tk.X, pady=(3,3))
         ttk.Button(box, text = "Randomize All Edge Weights", command = self.randomize).pack(fill = tk.X, pady = (3, 0))
+          
                 
- 
-        ttk.Label(box, text = "Route Search:", font=self.ui_font_bold).pack(anchor="w", pady=(30, 4))  # HEADING: route search control
+        ttk.Separator(box, orient='horizontal').pack(fill='x', pady=10)        
+        ttk.Label(box, text = "Route Search:", font=self.ui_font_bold).pack(anchor="w", pady=2)  # HEADING: route search control
 
         rowS = ttk.Frame(box)
         rowS.pack(fill = tk.X, pady = 4)
@@ -323,20 +446,59 @@ class GUI:
         self.goal_menu = ttk.Combobox(rowG, textvariable = self.goal_var, values = [], state = "readonly")
         self.goal_menu.pack(side = tk.LEFT, fill = tk.X, expand = True, padx = 4)        
         
+        rowM = ttk.Frame(box)   # metric selection - dist vs time
+        rowM.pack(fill=tk.X, pady=4)
+        ttk.Label(rowM, text="Optimize For: ").pack(side=tk.LEFT)
+        self.metric_var = tk.StringVar(value="distance")
+        ttk.Radiobutton(rowM, text="Distance", variable=self.metric_var, value="distance").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(rowM, text="Time", variable=self.metric_var, value="time").pack(side=tk.LEFT, padx=5)
+        
         self.access_only_var = tk.BooleanVar(value = False)
         ttk.Checkbutton(box, text = "Accessible Only",  variable = self.access_only_var).pack(anchor = "w", pady = (6, 0))
-        ttk.Button(box, text = "Run BFS", command = lambda: self.execute_search("bfs")).pack(fill = tk.X, pady = (6, 6))
-        ttk.Button(box, text = "Run DFS", command = lambda: self.execute_search("dfs")).pack(fill = tk.X)
+        
+        btn_frame = ttk.Frame(box)
+        btn_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(btn_frame, text="Unweighted (Hops):", font=("Arial", 10, "italic")).pack(anchor="w", pady=(5,0))
+        ttk.Button(btn_frame, text = "BFS (Shortest Hops)", command = lambda: self.execute_search("bfs")).pack(fill = tk.X, pady = 1)
+        ttk.Button(btn_frame, text = "DFS (Exploration)", command = lambda: self.execute_search("dfs")).pack(fill = tk.X, pady = 1)
 
-        ttk.Label(box, text = "Output:", font=self.ui_font_bold).pack(anchor="w", pady=(30, 4))
+        ttk.Label(btn_frame, text="Weighted (Cost):", font=("Arial", 10, "italic")).pack(anchor="w", pady=(5,0))
+        ttk.Button(btn_frame, text = "Dijkstra (Guaranteed Shortest)", command = lambda: self.execute_search("dijkstra")).pack(fill = tk.X, pady = 1)
+        ttk.Button(btn_frame, text = "A* Search (Smart/Heuristic)", command = lambda: self.execute_search("astar")).pack(fill = tk.X, pady = 1)
+
+
+        ttk.Separator(box, orient='horizontal').pack(fill='x', pady=10)        
+        ttk.Label(box, text="Network Optimization (MST):", font=self.ui_font_bold).pack(anchor="w", pady=2)        
+        btn_frame_mst = ttk.Frame(box)
+        btn_frame_mst.pack(fill=tk.X, pady=2)        
+        ttk.Button(btn_frame_mst, text="Kruskal's MST (Global Sort)", 
+                   command=lambda: self.execute_mst("kruskal")).pack(fill=tk.X, pady=1)
+        ttk.Button(btn_frame_mst, text="Prim's MST (Grow Tree)", 
+                   command=lambda: self.execute_mst("prim")).pack(fill=tk.X, pady=1)
+        
+        
+        ttk.Separator(box, orient='horizontal').pack(fill='x', pady=10)        
+        ttk.Label(box, text = "Output:", font=self.ui_font_bold).pack(anchor="w", pady=2)
         out_frame = ttk.Frame(box)
         out_frame.pack(fill=tk.BOTH, expand=True)
-        self.output = tk.Text(out_frame, height=14, wrap="word", state="disabled")
+        self.output = tk.Text(out_frame, height=14, width= 55, wrap="word", state="disabled")
         yscroll = ttk.Scrollbar(out_frame, orient="vertical", command=self.output.yview)
         self.output.configure(yscrollcommand=yscroll.set)
         self.output.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         yscroll.pack(side=tk.RIGHT, fill=tk.Y)
-          
+        
+        
+        ttk.Separator(box, orient='horizontal').pack(fill='x', pady=10)        
+        
+        info_frame = ttk.Frame(box)
+        info_frame.pack(fill=tk.X, pady=5)        
+        info_frame.grid_columnconfigure(0, weight=1)
+        info_frame.grid_columnconfigure(1, weight=1)        
+        btn_details = ttk.Button(info_frame, text="Algorithm Encyclopedia", command=self.show_algo_details)
+        btn_details.grid(row=0, column=0, padx=2, sticky="ew")        
+        btn_help = ttk.Button(info_frame, text="Help", command=self.show_help)
+        btn_help.grid(row=0, column=1, padx=2, sticky="ew")
             
     def keybind(self):
         self.canvas.bind("<Button-1>", self.click)
@@ -528,6 +690,7 @@ class GUI:
         self.clear_selection()
         self.text_output(f"Removed path:  {u} ↔ {v} \n")
 
+
     def remove_node_gui(self):
         if len(self.selected_nodes) != 1:
             messagebox.showerror("Error", "Select exactly 1 building to remove")
@@ -572,6 +735,7 @@ class GUI:
             self.update_visual(e)
         self.text_output("All path weights have been randomized to simulate dynamic campus traffic.")
         
+        
     def clear_animation(self):
         for token in self.current_animation_tokens:
             try:
@@ -587,6 +751,7 @@ class GUI:
                 self.canvas.itemconfig(oid, fill="black", outline = "black", width = 2)
         self.animating = False
         
+        
     def ping_node(self, name):
         _, _, oid, _ = self.graph.nodes[name]
         if not oid:
@@ -594,66 +759,67 @@ class GUI:
         self.canvas.itemconfig(oid, outline = "yellow", fill = "yellow", width = 3)
         self.current_animation_tokens.append(self.root.after(self.ANIM_PING_FLASH_MS, lambda: self.canvas.itemconfig(oid, outline = "black", fill = "black", width = 2)))
 
+
     def execute_search(self, algo):
         start = self.start_var.get().strip()
         goal = self.goal_var.get().strip()
+        weight_type = self.metric_var.get() 
+        
         if not start or not goal:
             messagebox.showerror("Error", "Select Start and Goal")
             return
         if start == goal:
             messagebox.showerror("Error", "Start and Goal must differ")
             return
+        
         accessible_only = bool(self.access_only_var.get())
-        if algo == "bfs":
-            self.text_output(
-                f"Navigation System executing Breadth-First Search "
-                f"from {start} to {goal} "
-                f"(accessible_only = {accessible_only})"
-            )
-        else:
-            self.text_output(
-                f"Navigation System executing Depth-First Search "
-                f"from {start} to {goal} "
-                f"(accessible_only = {accessible_only})"
-            )
+        self.text_output(f"Running {algo.upper()} from {start} to {goal} (accessible={accessible_only}, metric={weight_type})...")
+        
         try:
             if algo == "bfs":
                 path, order, discover = self.graph.bfs(start, goal, accessible_only)
-            else:
+            elif algo == "dfs":
                 path, order, discover = self.graph.dfs(start, goal, accessible_only)
+            elif algo == "dijkstra":
+                path, order, discover = self.graph.dijkstra(start, goal, weight_type, accessible_only)
+            elif algo == "astar":
+                path, order, discover = self.graph.astar(start, goal, weight_type, accessible_only)
+                
         except Exception as e:
             messagebox.showerror("Error", str(e))
             return
         
         if path:
-            self.text_output(
-                "Traversal order: "
-                f"{order}\n"
-                "Computed route: "
-                f"{path}\n"
-                "Route length (edges): "
-                f"{len(path) - 1}\n"
-            )
+            self.text_output("--------------------------------------------------")
+            self.text_output(f"Algorithm: {algo.upper()}")
+            self.text_output(f"Metric:    {weight_type}")
+            self.text_output(f"Nodes visited: {len(order)}")
+            self.text_output(f"Traversal order: {order}")  # <--- Restored this
+            self.text_output(f"Final Path: {' -> '.join(path)}")
+            self.text_output(f"Path Cost: {len(path)-1} edges (approx)") # You could sum actual weights here if you wanted
+            self.text_output("--------------------------------------------------\n")
         else:
-            self.text_output(
-                "Traversal order: "
-                f"{order}\n"
-                "No valid route was found under current constraints.\n"
-            )
-            
+            self.text_output("--------------------------------------------------")
+            self.text_output(f"Traversal order: {order}")
+            self.text_output("No valid route was found under current constraints.")
+            self.text_output("--------------------------------------------------\n")
+                    
         self.clear_animation()
         visit_seq = [start] + list(discover)    # ping nodes by discovery 
         delay = self.ANIM_TRAVERSAL_MS
+        
         for i, n in enumerate(visit_seq):
             self.current_animation_tokens.append(self.root.after(delay * i, lambda name = n: self.ping_node(name)))
             
         if path and len(path) >= 2:
             start_after = delay * max(1, len(visit_seq))
+            
             for j in range(len(path) - 1):
                 u, v = path[j], path[j + 1] 
                 e = self.graph.get_edge(u, v)
                 if e and e.line_id:
                     self.current_animation_tokens.append(self.root.after(start_after + self.ANIM_EDGE_MS * j, lambda lid = e.line_id: self.canvas.itemconfig(lid, fill = "green", width = 4)))
+                    
             node_start = start_after + self.ANIM_EDGE_MS * (len(path) - 1)
             for k, node in enumerate(path):
                 oid = self.graph.nodes[node][2]
@@ -688,6 +854,7 @@ class GUI:
     def on_escape(self, event = None):              
         self.clear_selection()
 
+
     def clear_selection(self):                     
         self.selected_nodes.clear()
         for _, (_, _, oid, _) in self.graph.nodes.items():
@@ -719,10 +886,196 @@ class GUI:
         
         return label_x, label_y, angle_draw
 
+    def execute_mst(self, algo):
+        weight_type = self.metric_var.get()
+        accessible_only = bool(self.access_only_var.get())
+        
+        start_node = self.start_var.get().strip() # prim's needs start node => choose arbitrarily choose first or user choice
+        if algo == "prim" and not start_node:
+            if self.graph.nodes:
+                start_node = list(self.graph.nodes.keys())[0]
+            else:
+                messagebox.showerror("Error", "Graph is empty")
+                return
+
+        self.text_output(f"Running {algo.upper()} optimization (metric={weight_type})...")
+        
+        try:
+            if algo == "kruskal":
+                edges, cost = self.graph.kruskal(weight_type, accessible_only)
+            elif algo == "prim":
+                edges, cost = self.graph.prim(start_node, weight_type, accessible_only)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        self.text_output("--------------------------------------------------")
+        self.text_output(f"Algorithm: {algo.upper()}")
+        self.text_output(f"Total Network Cost: {cost}")
+        self.text_output(f"Edges in MST: {len(edges)}")
+        self.text_output("--------------------------------------------------\n")
+        
+        self.clear_animation()
+        delay = self.ANIM_EDGE_MS
+        
+        for i, e in enumerate(edges): # turn line Blue to distinguish from pathfinding (green)
+            if e.line_id:
+                self.current_animation_tokens.append(
+                    self.root.after(delay * i, 
+                                  lambda lid=e.line_id: self.canvas.itemconfig(lid, fill="blue", width=4))
+                )
+                
+                
+    def create_popup(self, title, content_text):
+        if self.current_popup is not None and self.current_popup.winfo_exists():
+            self.current_popup.lift()
+            self.current_popup.focus_force()
+            return
+
+        top = tk.Toplevel(self.root)
+        top.title(title)
+        top.geometry("750x1200")
+        top.transient(self.root) 
+        self.current_popup = top
+        
+        def on_close():
+            self.current_popup = None
+            top.destroy()
+            
+        top.protocol("WM_DELETE_WINDOW", on_close)
+
+        lbl = ttk.Label(top, text=title, font=("Arial", 18, "bold"))
+        lbl.pack(pady=15)
+        
+        frame = ttk.Frame(top)
+        frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        
+        txt = tk.Text(frame, wrap="word", padx=15, pady=15, relief="flat", highlightthickness=0)
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=vsb.set)
+        
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        txt.tag_configure("header", font=("Arial", 14, "bold"), spacing1=20, spacing3=5)
+        txt.tag_configure("subheader", font=("Arial", 12, "bold"), spacing1=10, spacing3=2)
+        txt.tag_configure("normal", font=("Arial", 11), spacing1=5, spacing2=2)
+        
+        for item in content_text:
+            tag = item[0]
+            text = item[1]
+            txt.insert(tk.END, text + "\n", tag)
+            
+        txt.configure(state="disabled")
+
+
+    def show_algo_details(self):
+        content = [
+            ("header", "1. Breadth-First Search (BFS)"),
+            ("subheader", "Type: Unweighted Traversal"),
+            ("normal", "• Time Complexity: O(V + E)\n• Space Complexity: O(V)"),
+            ("normal", "BFS explores the graph layer by layer. It guarantees the shortest path in an unweighted graph (fewest hops). It treats a 100-mile highway and a 1-mile driveway as equal 'hops'."),
+            ("subheader", "Best Used For:"),
+            ("normal", "Peer-to-Peer networks, GPS (fewest turns), Web Crawlers."),
+            
+            ("header", "2. Depth-First Search (DFS)"),
+            ("subheader", "Type: Unweighted Exploration"),
+            ("normal", "• Time Complexity: O(V + E)\n• Space Complexity: O(V) (Recursion Stack)"),
+            ("normal", "DFS dives deep into a branch before backtracking. It does NOT guarantee the shortest path. It is often used to explore or check if a path exists, rather than finding the best one."),
+            ("subheader", "Best Used For:"),
+            ("normal", "Maze solving, Cycle detection in code dependencies, Topological Sorting."),
+
+            ("header", "3. Dijkstra's Algorithm"),
+            ("subheader", "Type: Weighted Shortest Path (Greedy)"),
+            ("normal", "• Time Complexity: O(E + V log V) (with Binary Heap)"),
+            ("normal", "Dijkstra's algorithm finds the true shortest path by respecting edge weights (Distance/Time). It expands outward from the start like a ripple, always choosing the cheapest known node next."),
+            ("subheader", "Key Constraint:"),
+            ("normal", "Cannot handle negative edge weights."),
+            
+            ("header", "4. A* Search (A-Star)"),
+            ("subheader", "Type: Weighted Shortest Path (Heuristic)"),
+            ("normal", "• Time Complexity: O(E) (Best case) to O(E + V log V) (Worst case)"),
+            ("normal", "A* is an optimization of Dijkstra. It adds a 'Heuristic' (h) to the cost function: f(n) = g(n) + h(n). In this app, h(n) is the straight-line distance to the goal. This pulls the search towards the destination, making it much faster."),
+            ("subheader", "Best Used For:"),
+            ("normal", "Video Game pathfinding, Google Maps, Robotics."),
+
+            ("header", "5. Kruskal's Algorithm"),
+            ("subheader", "Type: Minimum Spanning Tree (MST)"),
+            ("normal", "• Time Complexity: O(E log E)"),
+            ("normal", "Kruskal's sorts all edges by weight globally and adds them one by one if they don't form a cycle. It uses the 'Union-Find' data structure."),
+            ("subheader", "Real World Use:"),
+            ("normal", "Laying down LAN cables, piping systems, or power grids where you want to connect everyone with the least material possible."),
+
+            ("header", "6. Prim's Algorithm"),
+            ("subheader", "Type: Minimum Spanning Tree (MST)"),
+            ("normal", "• Time Complexity: O(E + V log V)"),
+            ("normal", "Prim's grows a single tree from a starting node. It always adds the cheapest connection from the tree to the outside world."),
+            ("subheader", "Fun Fact:"),
+            ("normal", "Prim's is faster than Kruskal's for 'Dense Graphs' (graphs with many edges), while Kruskal's is better for 'Sparse Graphs'."),
+        ]
+        self.create_popup("Algorithm Encyclopedia", content)
+
+
+    def show_help(self):
+        content = [
+            ("header", "How to Use This System"),
+            
+            ("subheader", "Step 1: Build Your Campus"),
+            ("normal", "• Enter a name in 'Add Building' and click 'Place'."),
+            ("normal", "• Click anywhere on the white canvas (or map) to drop the building."),
+            
+            ("subheader", "Step 2: Connect Buildings"),
+            ("normal", "• Click two buildings (nodes) to select them (they will turn blue)."),
+            ("normal", "• Enter Distance and Time values."),
+            ("normal", "• Click 'Add Path'. A line will appear connecting them."),
+            
+            ("subheader", "Step 3: Run Algorithms"),
+            ("normal", "• Select a Start Node and a Goal Node from the dropdowns."),
+            ("normal", "• Choose 'Distance' or 'Time' optimization."),
+            ("normal", "• Click a button (e.g., 'Dijkstra') to see the visualization."),
+            
+            ("header", "Important Notes"),
+            ("normal", "1. BFS & DFS ignore your weights! They only care about the number of hops."),
+            ("normal", "2. MST Algorithms (Kruskal/Prim) do not find a path from A to B. They highlight the most efficient wiring to connect ALL buildings."),
+            ("normal", "3. To modify an edge, select the two connected nodes and use 'Toggle Closure' (block road) or 'Remove Path'."),
+            
+            ("header", "Controls"),
+            ("subheader", "Left Click"),
+            ("normal", "Select a node. Click again to deselect."),
+            
+            ("subheader", "Escape Key"),
+            ("normal", "Clear all selections."),
+        ]
+        self.create_popup("User Guide & Instructions", content)
+
+
+class DisjointSet:  # helper from kruskal
+    def __init__(self, nodes):
+        self.parent = {n: n for n in nodes}
+    
+    def find(self, i):
+        if self.parent[i] != i:
+            self.parent[i] = self.find(self.parent[i])
+        return self.parent[i]
+    
+    def union(self, i, j):  # parent swap
+        root_i = self.find(i)
+        root_j = self.find(j)
+        if root_i != root_j:
+            self.parent[root_i] = root_j
+            return True 
+        return False 
+
+
     
 def main():
     root = tk.Tk()
-    root.title("CPSC 335 - Interactive Campus Navigation System (BFS/DFS)")
+    root.title("Campus/Graph Navigation System")
+    root.geometry("1200x900") 
+    try:
+        root.state('zoomed') 
+    except:
+        root.attributes('-zoomed', True)
     GUI(root)
     root.mainloop()
 
