@@ -1,26 +1,27 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from tkinter import font as tkfont
 import os
 import random
 import heapq
 import math
+import json 
+from PIL import Image, ImageTk 
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional, FrozenSet, Dict, Tuple, List, Set
 
-DEFAULT_MAP_PATH = os.path.join(os.path.dirname(__file__), "csuf_map.png")
 
 @dataclass
 class Edge:
-    u: str                              # endpoint A
-    v: str                              # endpoint B
+    u: str                              
+    v: str                              
     distance: int = 1
     time:int = 1
     accessible: bool = True
     closed: bool = False
-    line_id: Optional[int] = None       # to alter elements on canvas later
-    text_id: Optional[int] = None       # to track edge weight labels
+    line_id: Optional[int] = None      
+    text_id: Optional[int] = None      
     
     
     def key(self) -> FrozenSet[str]:
@@ -36,13 +37,12 @@ class Edge:
 
 class Graph:
     def __init__(self):
-        # nodes[name] = (x, y, oid, lid), x,y = screen coords for drawing, oid = canvas oval id (circle for node), lid = canvas label id (text for node name) 
+
         self.nodes: Dict[str, Tuple[int, int, Optional[int], Optional[int]]] = {} 
-        self.edges: Dict[FrozenSet[str], Edge] = {} # edges[frozenset({u,v})] = Edge(...)  --> canonical store for each undirected edge
-        self.adj: Dict[str, Dict[str, Edge]] = {} # adj[u][v] = Edge(...)  --> adjacency map for traversal (quick neighbor lookup); duplicated in both directions for undirected behavior
+        self.edges: Dict[FrozenSet[str], Edge] = {} 
+        self.adj: Dict[str, Dict[str, Edge]] = {} 
         
-        
-    def add_node(self, name, x, y):  # build a node entry before drawing it on canvas; enforce uniqueness of building names --> building name IS the node id
+    def add_node(self, name, x, y):  
         if name in self.nodes:
             raise ValueError(f"Duplicate node '{name}'")    # CHECK --> no duplicate nodes 
         self.nodes[name] = (x, y, None, None)   # oid/lid filled in later by GUI.draw_node()
@@ -249,8 +249,7 @@ class Graph:
                     discover_order.append(v)
 
         if goal not in parent:
-            return [], visited_order, discover_order
-        
+            return [], visited_order, discover_order        
         path = []
         curr = goal
         while curr is not None:
@@ -311,10 +310,46 @@ class Graph:
                     
         return mst_edges, total_cost
 
+
+    def to_dict(self):
+        """Serialize graph data to a dictionary."""
+        return {
+            "nodes": [
+                {"name": n, "x": data[0], "y": data[1]} 
+                for n, data in self.nodes.items()
+            ],
+            "edges": [
+                {
+                    "u": e.u, "v": e.v, 
+                    "distance": e.distance, "time": e.time, 
+                    "accessible": e.accessible, "closed": e.closed
+                }
+                for e in self.edges.values()
+            ]
+        }
+
+    def from_dict(self, data):
+        """Clear current graph and rebuild from dictionary."""
+        self.nodes.clear()
+        self.edges.clear()
+        self.adj.clear()
+        
+        for n_data in data["nodes"]:
+            self.nodes[n_data["name"]] = (n_data["x"], n_data["y"], None, None)
+            self.adj[n_data["name"]] = {}
+            
+        for e_data in data["edges"]:
+            self.add_edge(
+                e_data["u"], e_data["v"], 
+                e_data["distance"], e_data["time"], 
+                e_data["accessible"]
+            )
+            if e_data.get("closed", False):
+                self.edges[frozenset({e_data["u"], e_data["v"]})].closed = True
                 
     
 class GUI:
-    NODE_R = 12     # node size control
+    NODE_R = 10     # node size control
     ANIM_TRAVERSAL_MS = 600     # ping interval timing
     ANIM_EDGE_MS = 400          # interval between edges turning green 
     ANIM_PING_FLASH_MS = 600    # duration node stays yellow
@@ -327,12 +362,16 @@ class GUI:
         self.mode_place_pending_name: Optional[str] = None
         self.selected_nodes: list[str] = []
         
-        self.map_image: Optional[tk.PhotoImage] = None   # cached campus map bitap
-        self.map_item: Optional[int] = None              # canvas item id for the map image (to hide/show)
-        self.overlay_var = tk.BooleanVar(value = False)   
+        self.bg_image_original = None  # stores high-res PIL Image
+        self.bg_image_tk = None        # Ttinter-ready image
+        self.bg_file_path = None       # file path for saving
+        self.map_item: Optional[int] = None              
+        self.overlay_var = tk.BooleanVar(value = True) 
         
-        self.ui_font = tkfont.Font(family="Arial", size=13, weight="normal")            
-        self.ui_font_bold = tkfont.Font(family="Arial", size=15, weight="bold")  
+        self.current_zoom = 1.0  # Track zoom level  
+        
+        self.ui_font = tkfont.Font(family="Arial", size=11, weight="normal")            
+        self.ui_font_bold = tkfont.Font(family="Arial", size=13, weight="bold")  
         self.root.option_add("*Font", self.ui_font)                     
         self.root.option_add("*Text*Font", self.ui_font)
                         
@@ -359,92 +398,147 @@ class GUI:
         self.current_animation_tokens: list[int] = []        
         self.current_popup: Optional[tk.Toplevel] = None
     
+    
     def build_layout(self):
         self.root.geometry("1200x950")   
         try:
-            self.root.state('zoomed')   # windows zoom
+            self.root.state('zoomed')   
         except:
             try:
-                # Linux 'Zoomed'
-                self.root.attributes('-zoomed', True) # linux zoom
+                self.root.attributes('-zoomed', True)
             except:
-                w = self.root.winfo_screenwidth() # Mac (No 'zoomed' state) => manually set geometry to screen dimensions
+                w = self.root.winfo_screenwidth()
                 h = self.root.winfo_screenheight()
                 self.root.geometry(f"{w}x{h}+0+0")
 
         self.root.grid_rowconfigure(0, weight=1)
         self.root.grid_columnconfigure(0, weight=1) 
-        self.root.grid_columnconfigure(1, weight=0)
-                
-        # LEFT SIDE: canvas frame
+        self.root.grid_columnconfigure(1, weight=0) 
+        
         self.left = ttk.Frame(self.root)
         self.left.grid(row=0, column=0, sticky="nsew")  
         self.canvas = tk.Canvas(self.left, bg="white")
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
-        # RIGHT SIDE: sidebar
         self.right = ttk.Frame(self.root) 
         self.right.grid(row=0, column=1, sticky="nsew")
 
-        box = tk.Frame(self.right, padx=8, pady=8)
-        box.pack(fill=tk.Y)
+
+        self.right_canvas = tk.Canvas(self.right, width=500) 
+        self.right_scrollbar = ttk.Scrollbar(self.right, orient="vertical", command=self.right_canvas.yview)
         
-        ttk.Label(box, text = "CSUF Default Map Overlay:", font=self.ui_font_bold).pack(anchor="w", pady=(0,4))  # HEADING          
-        ttk.Checkbutton(box, text = "Show Map", variable=self.overlay_var, command = self.toggle_map).pack(anchor = "w")   
+        self.right_scrollbar.pack(side="right", fill="y")
+        self.right_canvas.pack(side="left", fill="both", expand=True)
+        self.right_canvas.configure(yscrollcommand=self.right_scrollbar.set)
+        box = tk.Frame(self.right_canvas, padx=8, pady=8)
+        self.right_canvas_window = self.right_canvas.create_window((0,0), window=box, anchor="nw")
+
+        def on_frame_configure(event):
+            self.right_canvas.configure(scrollregion=self.right_canvas.bbox("all"))
+        
+        def on_canvas_configure(event):
+            self.right_canvas.itemconfig(self.right_canvas_window, width=event.width)
+            
+        box.bind("<Configure>", on_frame_configure)
+        self.right_canvas.bind("<Configure>", on_canvas_configure)
+
+        def _on_mousewheel(event):
+            try:
+                self.right_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            except:
+                pass
+
+        def _bind_wheel(event):
+            self.right_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            
+        def _unbind_wheel(event):
+            self.right_canvas.unbind_all("<MouseWheel>")
+
+        self.right_canvas.bind('<Enter>', _bind_wheel)
+        self.right_canvas.bind('<Leave>', _unbind_wheel)
+        
+        ttk.Label(box, text = "Project Management:", font=self.ui_font_bold).pack(anchor="w", pady=(0,4))
+        row_proj = ttk.Frame(box)
+        row_proj.pack(fill=tk.X, pady=2)
+        ttk.Button(row_proj, text="Save Project", command=self.save_project).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,2))
+        ttk.Button(row_proj, text="Load Project", command=self.load_project).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2,0))
+
+        ttk.Separator(box, orient='horizontal').pack(fill='x', pady=10)
+        ttk.Label(box, text = "Map Background:", font=self.ui_font_bold).pack(anchor="w", pady=(0,3))        
+        row_map = ttk.Frame(box)
+        row_map.pack(fill=tk.X, pady=2)
+        ttk.Button(row_map, text="Load Map Image", command=self.open_background_dialog).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,5))
+        ttk.Checkbutton(row_map, text="Show", variable=self.overlay_var, command=self.refresh_background).pack(side=tk.LEFT)
+        
+        ttk.Label(
+            box, 
+            text="Supports: .png, .jpg, .jpeg, .bmp, .gif", 
+            font=("Arial", 9, "italic"), 
+            foreground="#555555"
+        ).pack(anchor="w", pady=(0, 8))
+        
+        row_zoom = ttk.Frame(box)
+        row_zoom.pack(fill=tk.X, pady=(5,0))    
+        ttk.Label(row_zoom, text="Zoom:").pack(side=tk.LEFT)  
+              
+        self.zoom_scale = tk.Scale(
+            row_zoom, 
+            from_=0.5, to=3.0, 
+            resolution=0.1, 
+            orient=tk.HORIZONTAL, 
+            showvalue=0,                
+            command=self.on_zoom_change
+        )
+        self.zoom_scale.set(1.0) 
+        self.zoom_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.zoom_value_lbl = ttk.Label(row_zoom, text="1.0x", width=4)
+        self.zoom_value_lbl.pack(side=tk.LEFT)
        
-       
-        ttk.Separator(box, orient='horizontal').pack(fill='x', pady=10)        
-        ttk.Label(box, text = "Add Building:", font=self.ui_font_bold).pack(anchor="w", pady=2)      # HEADING: node controls
+        ttk.Separator(box, orient='horizontal').pack(fill='x', pady=10)          
+        ttk.Label(box, text = "Add Point of Interest:", font=self.ui_font_bold).pack(anchor="w", pady=3)
         row = ttk.Frame(box)
         row.pack(fill = tk.X)
         self.node_name_var = tk.StringVar()
         ttk.Entry(row, textvariable = self.node_name_var).pack(side = tk.LEFT, fill = tk.X, expand = True)
-        ttk.Button(row, text = "Place", command = self.start_node).pack(side = tk.LEFT, padx = (8,0))      
-    
-    
-        ttk.Separator(box, orient='horizontal').pack(fill='x', pady=10)        
-        ttk.Label(box, text = "Connect Buildings:", font=self.ui_font_bold).pack(anchor="w", pady=2)    # HEADING: edge controls
+        ttk.Button(row, text = "Place Point", command = self.start_node).pack(side = tk.LEFT, padx = (8,0))      
         
+        ttk.Separator(box, orient='horizontal').pack(fill='x', pady=10)        
+        ttk.Label(box, text = "Connect Points:", font=self.ui_font_bold).pack(anchor="w", pady=3)
         self.selected_label = ttk.Label(box, text = "Currently Selected: ")
-        self.selected_label.pack(anchor = "w", pady = (4, 4))
-      
+        self.selected_label.pack(anchor = "w", pady = (3, 3))      
         r1 = ttk.Frame(box)
-        r1.pack(fill = tk.X, pady = (4, 4))        
+        r1.pack(fill = tk.X, pady = (3, 3))        
         ttk.Label(r1, text = "Distance:").pack(side = tk.LEFT)
         self.dist_var = tk.StringVar(value = "1")
-        ttk.Entry(r1, width = 5, textvariable = self.dist_var).pack(side = tk.LEFT, padx = (6, 20))
-        
+        ttk.Entry(r1, width = 5, textvariable = self.dist_var).pack(side = tk.LEFT, padx = (6, 20))        
         ttk.Label(r1, text = "Time:").pack(side = tk.LEFT)
         self.time_var = tk.StringVar(value = "1")
-        ttk.Entry(r1, width = 5, textvariable = self.time_var).pack(side = tk.LEFT, padx = (6, 12))
-        
+        ttk.Entry(r1, width = 5, textvariable = self.time_var).pack(side = tk.LEFT, padx = (6, 12))        
         self.access_var = tk.BooleanVar(value = True)        
-        ttk.Checkbutton(r1, text = "Accessible", variable = self.access_var).pack(side = tk.LEFT, padx = (18, 0))
-        
-        ttk.Button(box, text="Remove Building", command=self.remove_node_gui).pack(fill=tk.X, pady=(6,3))
-        ttk.Button(box, text = "Add Path", command = self.add_edge).pack(fill = tk.X, pady = (3,3))
-        ttk.Button(box, text= "Remove Path", command=self.remove_edge_gui).pack(fill=tk.X, pady=(3,3))
-        ttk.Button(box, text = "Toggle Closure", command = self.toggle_close).pack(fill = tk.X, pady = (3,3))
-        ttk.Button(box, text="Toggle Accessibility", command=self.toggle_accessible).pack(fill=tk.X, pady=(3,3))
-        ttk.Button(box, text = "Randomize All Edge Weights", command = self.randomize).pack(fill = tk.X, pady = (3, 0))
+        ttk.Checkbutton(r1, text = "Accessible", variable = self.access_var).pack(side = tk.LEFT, padx = (18, 0))        
+        ttk.Button(box, text="Remove Building", command=self.remove_node_gui).pack(fill=tk.X, pady=(6,1))
+        ttk.Button(box, text = "Add Path", command = self.add_edge).pack(fill = tk.X, pady = (1,1))
+        ttk.Button(box, text= "Remove Path", command=self.remove_edge_gui).pack(fill=tk.X, pady=(1,1))
+        ttk.Button(box, text = "Toggle Closure", command = self.toggle_close).pack(fill = tk.X, pady = (1,1))
+        ttk.Button(box, text="Toggle Accessibility", command=self.toggle_accessible).pack(fill=tk.X, pady=(1,1))
+        ttk.Button(box, text = "Randomize All Edge Weights", command = self.randomize).pack(fill = tk.X, pady = (1, 0))
           
                 
         ttk.Separator(box, orient='horizontal').pack(fill='x', pady=10)        
-        ttk.Label(box, text = "Route Search:", font=self.ui_font_bold).pack(anchor="w", pady=2)  # HEADING: route search control
-
+        ttk.Label(box, text = "Route Search:", font=self.ui_font_bold).pack(anchor="w", pady=3)  
         rowS = ttk.Frame(box)
         rowS.pack(fill = tk.X, pady = 4)
         ttk.Label(rowS, text = "Start: ").pack(side = tk.LEFT)
         self.start_var = tk.StringVar(value = "")
         self.start_menu = ttk.Combobox(rowS, textvariable = self.start_var, values = [], state = "readonly")
-        self.start_menu.pack(side = tk.LEFT, fill = tk.X, expand = True, padx = 4)
-        
+        self.start_menu.pack(side = tk.LEFT, fill = tk.X, expand = True, padx = 4)   
+             
         rowG = ttk.Frame(box) 
         rowG.pack(fill = tk.X, pady = 4)
         ttk.Label(rowG, text = "Goal: ").pack(side = tk.LEFT)
         self.goal_var = tk.StringVar(value = "")
         self.goal_menu = ttk.Combobox(rowG, textvariable = self.goal_var, values = [], state = "readonly")
-        self.goal_menu.pack(side = tk.LEFT, fill = tk.X, expand = True, padx = 4)        
+        self.goal_menu.pack(side = tk.LEFT, fill = tk.X, expand = True, padx = 4)    
         
         rowM = ttk.Frame(box)   # metric selection - dist vs time
         rowM.pack(fill=tk.X, pady=4)
@@ -454,7 +548,7 @@ class GUI:
         ttk.Radiobutton(rowM, text="Time", variable=self.metric_var, value="time").pack(side=tk.LEFT, padx=5)
         
         self.access_only_var = tk.BooleanVar(value = False)
-        ttk.Checkbutton(box, text = "Accessible Only",  variable = self.access_only_var).pack(anchor = "w", pady = (6, 0))
+        ttk.Checkbutton(box, text = "Accessible Only",  variable = self.access_only_var).pack(anchor = "w", pady = (3, 0))
         
         btn_frame = ttk.Frame(box)
         btn_frame.pack(fill=tk.X, pady=5)
@@ -469,7 +563,7 @@ class GUI:
 
 
         ttk.Separator(box, orient='horizontal').pack(fill='x', pady=10)        
-        ttk.Label(box, text="Network Optimization (MST):", font=self.ui_font_bold).pack(anchor="w", pady=2)        
+        ttk.Label(box, text="Network Optimization (MST):", font=self.ui_font_bold).pack(anchor="w", pady=3)        
         btn_frame_mst = ttk.Frame(box)
         btn_frame_mst.pack(fill=tk.X, pady=2)        
         ttk.Button(btn_frame_mst, text="Kruskal's MST (Global Sort)", 
@@ -479,18 +573,17 @@ class GUI:
         
         
         ttk.Separator(box, orient='horizontal').pack(fill='x', pady=10)        
-        ttk.Label(box, text = "Output:", font=self.ui_font_bold).pack(anchor="w", pady=2)
+        ttk.Label(box, text = "Output:", font=self.ui_font_bold).pack(anchor="w", pady=3)
         out_frame = ttk.Frame(box)
         out_frame.pack(fill=tk.BOTH, expand=True)
-        self.output = tk.Text(out_frame, height=14, width= 55, wrap="word", state="disabled")
+        self.output = tk.Text(out_frame, height=13, width= 55, wrap="word", state="disabled")
         yscroll = ttk.Scrollbar(out_frame, orient="vertical", command=self.output.yview)
         self.output.configure(yscrollcommand=yscroll.set)
         self.output.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         yscroll.pack(side=tk.RIGHT, fill=tk.Y)
         
         
-        ttk.Separator(box, orient='horizontal').pack(fill='x', pady=10)        
-        
+        ttk.Separator(box, orient='horizontal').pack(fill='x', pady=12)
         info_frame = ttk.Frame(box)
         info_frame.pack(fill=tk.X, pady=5)        
         info_frame.grid_columnconfigure(0, weight=1)
@@ -499,6 +592,7 @@ class GUI:
         btn_details.grid(row=0, column=0, padx=2, sticky="ew")        
         btn_help = ttk.Button(info_frame, text="Help", command=self.show_help)
         btn_help.grid(row=0, column=1, padx=2, sticky="ew")
+          
             
     def keybind(self):
         self.canvas.bind("<Button-1>", self.click)
@@ -515,7 +609,7 @@ class GUI:
     def start_node(self):
         name = self.node_name_var.get().strip()
         if not name:
-            messagebox.showerror("Error", "Enter a building name")
+            messagebox.showerror("Error", "Enter a Point Name")
             return
         if name in self.graph.nodes:
             messagebox.showerror("Error", f"Duplicate node '{name}'")
@@ -527,26 +621,29 @@ class GUI:
         
     def draw_node(self, name, x, y) -> tuple[int, int]:
         r = self.NODE_R
-        oid = self.canvas.create_oval(x - r, y - r, x + r, y + r, fill = "black", outline = "black", width = 2, tags = (f"node:{name}",))
-        lid = self.canvas.create_text(x, y - r - 10, text = name, font=self.ui_font)
+        oid = self.canvas.create_oval(x - r, y - r, x + r, y + r, fill = "black", outline = "black", width = 2, tags = (f"node:{name}", "all_elements"))
+        lid = self.canvas.create_text(x, y - r - 10, text = name, font=self.ui_font, tags="all_elements")
+        
+        self.canvas.scale(oid, 0, 0, self.current_zoom, self.current_zoom)
+        self.canvas.scale(lid, 0, 0, self.current_zoom, self.current_zoom)
         return oid, lid
     
     
-    def draw_edge(self, edge): # draw line between edge.u and edge.v; also draw distance/time label offset from line so its readable
+    def draw_edge(self, edge): 
         x_u, y_u, _, _ = self.graph.nodes[edge.u]
         x_v, y_v, _, _ = self.graph.nodes[edge.v]
-        edge.line_id = self.canvas.create_line(x_u, y_u, x_v, y_v, fill=edge.color(), width=2)
+        edge.line_id = self.canvas.create_line(x_u, y_u, x_v, y_v, fill=edge.color(), width=2, tags="all_elements")
 
-        lx, ly, ang = self.compute_edge_label_position(edge, offset_px=12) # compute label position slightly off the midpoint normal to the segment
+        lx, ly, ang = self.compute_edge_label_position(edge, offset_px=12) 
 
-        edge.text_id = self.canvas.create_text(  # draw "d : X,  t : Y" text angled to roughly follow the segment orientation
-            lx, ly,
-            text=f"d : {edge.distance},  t : {edge.time}",
-            font=self.ui_font,
-            fill="gray",
-            angle=ang,
+        edge.text_id = self.canvas.create_text(  
+            lx, ly, text=f"d : {edge.distance},  t : {edge.time}", font=self.ui_font, fill="gray", angle=ang,
+            tags="all_elements" # <--- ADDED TAG
         )
-        self.canvas.tag_raise(edge.text_id) # ensure label not hidden behind line
+        self.canvas.tag_raise(edge.text_id) 
+
+        self.canvas.scale(edge.line_id, 0, 0, self.current_zoom, self.current_zoom)
+        self.canvas.scale(edge.text_id, 0, 0, self.current_zoom, self.current_zoom)
 
 
     def add_edge(self):
@@ -577,26 +674,34 @@ class GUI:
         self.goal_menu["values"] = names
   
     
-    def click(self, event): # canvas click handler
+    def click(self, event):
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        
+        logical_x = canvas_x / self.current_zoom
+        logical_y = canvas_y / self.current_zoom
+
         if self.mode_place_pending_name is not None:
-            name = self.mode_place_pending_name
-            self.mode_place_pending_name = None
-            self.canvas.configure(cursor = "")
+            name = self.mode_place_pending_name            
             try:
-                self.graph.add_node(name, event.x, event.y)
-                oid, lid = self.draw_node(name, event.x, event.y)              
+                self.graph.add_node(name, logical_x, logical_y)                
+                oid, lid = self.draw_node(name, logical_x, logical_y)                
                 x, y, _, _ = self.graph.nodes[name]
-                self.graph.nodes[name] = (x, y, oid, lid)
+                self.graph.nodes[name] = (x, y, oid, lid)                
+
+                self.mode_place_pending_name = None
+                self.canvas.configure(cursor="")
                 self.node_name_var.set("")
-                self.text_output(f"Added building:  '{name}'")
+                self.text_output(f"Placed point: '{name}'")
                 self.refresh_node_menu()
             except Exception as exc:
                 messagebox.showerror("Error", str(exc))
-            return 
-        clicked = self.hit_node(event.x, event.y)
-        if clicked:
-            self.toggle_select_node(clicked)
-            self.refresh_node_menu()
+                return
+        else:           
+            clicked = self.hit_node(canvas_x, canvas_y)
+            if clicked:
+                self.toggle_select_node(clicked)
+                self.refresh_node_menu()
 
         
     def hit_node(self, x, y) -> Optional[str]:
@@ -630,7 +735,9 @@ class GUI:
             self.canvas.itemconfig(edge.line_id, fill=edge.color(), width=2)
         if edge.text_id:
             lx, ly, ang = self.compute_edge_label_position(edge, offset_px=12)
-            self.canvas.coords(edge.text_id, lx, ly)
+            screen_x = lx * self.current_zoom
+            screen_y = ly * self.current_zoom            
+            self.canvas.coords(edge.text_id, screen_x, screen_y)
             self.canvas.itemconfig(edge.text_id, font=self.ui_font, text=f"d : {edge.distance},  t : {edge.time}", angle=ang)
             self.canvas.tag_raise(edge.text_id)
             
@@ -693,13 +800,13 @@ class GUI:
 
     def remove_node_gui(self):
         if len(self.selected_nodes) != 1:
-            messagebox.showerror("Error", "Select exactly 1 building to remove")
+            messagebox.showerror("Error", "Select exactly 1 point")
             return
 
         name = self.selected_nodes[0]
 
         if name not in self.graph.nodes:
-            messagebox.showerror("Error", "That building no longer exists")
+            messagebox.showerror("Error", "That point no longer exists")
             return
 
         x, y, oid, lid = self.graph.nodes[name]
@@ -794,9 +901,9 @@ class GUI:
             self.text_output(f"Algorithm: {algo.upper()}")
             self.text_output(f"Metric:    {weight_type}")
             self.text_output(f"Nodes visited: {len(order)}")
-            self.text_output(f"Traversal order: {order}")  # <--- Restored this
+            self.text_output(f"Traversal order: {order}") 
             self.text_output(f"Final Path: {' -> '.join(path)}")
-            self.text_output(f"Path Cost: {len(path)-1} edges (approx)") # You could sum actual weights here if you wanted
+            self.text_output(f"Path Cost: {len(path)-1} edges (approx)") 
             self.text_output("--------------------------------------------------\n")
         else:
             self.text_output("--------------------------------------------------")
@@ -826,29 +933,6 @@ class GUI:
                 if oid:
                     self.current_animation_tokens.append(self.root.after(node_start + self.ANIM_NODE_MS * k,lambda o=oid: self.canvas.itemconfig(o, fill="green", outline="green", width=3)))
                 
-                
-    def toggle_map(self):
-        if self.overlay_var.get():
-            # lazy-load once
-            if self.map_image is None:
-                if not os.path.exists(DEFAULT_MAP_PATH):
-                    messagebox.showerror("Error", f"Missing map image:\n{DEFAULT_MAP_PATH}")
-                    self.overlay_var.set(False)
-                    return
-                try:
-                    self.map_image = tk.PhotoImage(file = DEFAULT_MAP_PATH)
-                except Exception as e:
-                    messagebox.showerror("Error", f"Failed to load map: {e}")
-                    self.overlay_var.set(False)
-                    return
-            if self.map_item:
-                self.canvas.delete(self.map_item)
-            self.map_item = self.canvas.create_image(0, 0, image = self.map_image, anchor = "nw")
-            self.canvas.tag_lower(self.map_item)
-        else:
-            if self.map_item:
-                self.canvas.delete(self.map_item)
-                self.map_item = None
 
 
     def on_escape(self, event = None):              
@@ -1018,38 +1102,150 @@ class GUI:
 
     def show_help(self):
         content = [
-            ("header", "How to Use This System"),
+            ("header", "User Guide & Controls"),
             
-            ("subheader", "Step 1: Build Your Campus"),
-            ("normal", "• Enter a name in 'Add Building' and click 'Place'."),
-            ("normal", "• Click anywhere on the white canvas (or map) to drop the building."),
+            ("subheader", "1. Setup & Navigation"),
+            ("normal", "• Load Map: Import a PNG/JPG floorplan or map. It will center at (0,0)."),
+            ("normal", "• Zoom: Use the slider to zoom in/out (0.5x to 3.0x)."),
+            ("normal", "• Pan: If the map is larger than the window, use your mouse wheel or trackpad to scroll."),
+
+            ("subheader", "2. Building the Graph"),
+            ("normal", "• Place Node: Enter a name (e.g., 'Library'), click 'Place Point', then click on the map."),
+            ("normal", "• Connect Nodes: Click two nodes (they turn blue), enter Distance/Time, and click 'Add Path'."),
+            ("normal", "• Edit: Select nodes to Remove, Toggle Closed (block path), or Toggle Accessibility (stairs/elevators)."),
             
-            ("subheader", "Step 2: Connect Buildings"),
-            ("normal", "• Click two buildings (nodes) to select them (they will turn blue)."),
-            ("normal", "• Enter Distance and Time values."),
-            ("normal", "• Click 'Add Path'. A line will appear connecting them."),
+            ("subheader", "3. Project Management"),
+            ("normal", "• Save Project: Saves your nodes, connections, and background reference to a .json file."),
+            ("normal", "• Load Project: Wipes the current canvas and restores a previously saved state."),
             
-            ("subheader", "Step 3: Run Algorithms"),
-            ("normal", "• Select a Start Node and a Goal Node from the dropdowns."),
-            ("normal", "• Choose 'Distance' or 'Time' optimization."),
-            ("normal", "• Click a button (e.g., 'Dijkstra') to see the visualization."),
+            ("subheader", "4. Algorithms"),
+            ("normal", "• Select Start/Goal nodes and click an algorithm (BFS, Dijkstra, etc.)."),
+            ("normal", "• Green Lines = The calculated path."),
+            ("normal", "• Yellow Flashes = The computer 'thinking' (scanning nodes)."),
             
-            ("header", "Important Notes"),
-            ("normal", "1. BFS & DFS ignore your weights! They only care about the number of hops."),
-            ("normal", "2. MST Algorithms (Kruskal/Prim) do not find a path from A to B. They highlight the most efficient wiring to connect ALL buildings."),
-            ("normal", "3. To modify an edge, select the two connected nodes and use 'Toggle Closure' (block road) or 'Remove Path'."),
-            
-            ("header", "Controls"),
-            ("subheader", "Left Click"),
-            ("normal", "Select a node. Click again to deselect."),
-            
-            ("subheader", "Escape Key"),
-            ("normal", "Clear all selections."),
+            ("header", "Tips & Tricks"),
+            ("normal", "• The 'Show' checkbox hides the background image if you want to see just the abstract graph."),
+            ("normal", "• 'Accessible Only' tells the algorithms to ignore paths marked as 'Not Accessible' (e.g., finding a wheelchair route)."),
+            ("normal", "• Saving works best if you keep the background image in the same folder as the .json file."),
         ]
         self.create_popup("User Guide & Instructions", content)
 
 
-class DisjointSet:  # helper from kruskal
+    def open_background_dialog(self):
+        file_path = filedialog.askopenfilename(
+            title="Select Map Image",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.gif"), ("All Files", "*.*")]
+        )
+        if file_path:
+            self.set_background(file_path)
+
+    def set_background(self, file_path):
+        try:
+            self.bg_image_original = Image.open(file_path) # Load via PIL
+            self.bg_file_path = file_path
+            self.refresh_background()
+            self.text_output(f"Loaded map: {os.path.basename(file_path)}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load image: {e}")
+
+    def refresh_background(self):
+        """Redraws the background image based on current zoom and visibility."""
+        if self.map_item:
+            self.canvas.delete(self.map_item)
+            self.map_item = None
+                        
+        if not self.overlay_var.get() or not self.bg_image_original:
+            return
+
+        orig_w, orig_h = self.bg_image_original.size
+        new_w = int(orig_w * self.current_zoom)
+        new_h = int(orig_h * self.current_zoom)
+        
+        resized = self.bg_image_original.resize((new_w, new_h), Image.LANCZOS)
+        self.bg_image_tk = ImageTk.PhotoImage(resized)        
+       
+        self.map_item = self.canvas.create_image(0, 0, image=self.bg_image_tk, anchor="nw")
+        self.canvas.tag_lower(self.map_item) # Push behind nodes
+
+
+    def save_project(self):
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON Files", "*.json")]
+        )
+        if not file_path:
+            return
+            
+        data = {
+            "graph": self.graph.to_dict(),
+            "background_path": self.bg_file_path,
+            "zoom": self.current_zoom
+        }
+        
+        try:
+            with open(file_path, 'w') as f:
+                json.dump(data, f, indent=4)
+            self.text_output(f"Project saved to {os.path.basename(file_path)}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Save failed: {e}")
+
+    def load_project(self):
+        file_path = filedialog.askopenfilename(filetypes=[("JSON Files", "*.json")])
+        
+        if not file_path:
+            return            
+        try:
+            with open(file_path, 'r') as f:
+                data = json.load(f)            
+            self.clear_selection()
+            self.graph.from_dict(data["graph"])            
+            bg_path = data.get("background_path")            
+            if bg_path and os.path.exists(bg_path):
+                self.set_background(bg_path)
+            elif bg_path:
+                self.text_output(f"Warning: Original background file not found at {bg_path}")
+            
+            self.current_zoom = data.get("zoom", 1.0)
+            self.zoom_scale.set(self.current_zoom)            
+            self.canvas.delete("all") 
+            self.refresh_background() 
+            
+            for name, (x, y, _, _) in self.graph.nodes.items():
+                oid, lid = self.draw_node(name, x, y)
+                self.graph.nodes[name] = (x, y, oid, lid)    
+                            
+            for e in self.graph.edges.values():
+                self.draw_edge(e)
+                                
+            self.refresh_node_menu()
+            self.text_output(f"Project loaded from {os.path.basename(file_path)}")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Load failed: {e}")
+
+
+    def on_zoom_change(self, value):
+        new_zoom = float(value)
+        if hasattr(self, 'zoom_value_lbl'):
+            self.zoom_value_lbl.config(text=f"{new_zoom:.1f}x")
+            
+        scale_factor = new_zoom / self.current_zoom 
+        self.current_zoom = new_zoom        
+        self.canvas.scale("all_elements", 0, 0, scale_factor, scale_factor)
+        self.refresh_background()
+        base_size = 13
+        new_size = max(8, int(base_size * self.current_zoom)) 
+        new_font = (self.ui_font.cget("family"), new_size)
+
+        for _, _, _, lid in self.graph.nodes.values():
+            if lid:
+                self.canvas.itemconfig(lid, font=new_font)
+        
+        for e in self.graph.edges.values():
+            if e.text_id:
+                self.canvas.itemconfig(e.text_id, font=new_font)
+
+class DisjointSet:  # helper for kruskal
     def __init__(self, nodes):
         self.parent = {n: n for n in nodes}
     
@@ -1066,11 +1262,10 @@ class DisjointSet:  # helper from kruskal
             return True 
         return False 
 
-
     
 def main():
     root = tk.Tk()
-    root.title("Campus/Graph Navigation System")
+    root.title("GraphAlgo Visualizer - Universal Pathfinding Tool")
     root.geometry("1200x900") 
     try:
         root.state('zoomed') 
